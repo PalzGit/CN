@@ -1,0 +1,288 @@
+import socket
+import threading
+import time
+from datetime import datetime
+
+
+# ==================== TCP SERVER ====================
+class TCPServer:
+    def __init__(self, host="127.0.0.1", port=12345):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.running = False
+        self._lock = threading.Lock()
+
+    def start(self):
+        print("=" * 50)
+        print("       TCP SERVER INITIALIZATION")
+        print("=" * 50)
+
+        # Try the requested port and the next four ports.
+        for port in range(self.port, self.port + 5):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            try:
+                sock.bind((self.host, port))
+                sock.listen(5)
+                sock.settimeout(1.0)
+
+                self.server_socket = sock
+                self.port = port
+                self.running = True
+
+                print(f"\nSocket bound to {self.host}:{self.port}")
+                print(f"Server listening on port {self.port}")
+
+                threading.Thread(
+                    target=self.accept_connections,
+                    daemon=True
+                ).start()
+                return True
+
+            except OSError as exc:
+                sock.close()
+                print(f"Port {port} unavailable: {exc}")
+
+        print("Server failed: no available port found.")
+        return False
+
+    def accept_connections(self):
+        while self.running:
+            try:
+                client_socket, address = self.server_socket.accept()
+                print(f"\nClient connected: {address}")
+
+                threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, address),
+                    daemon=True
+                ).start()
+
+            except socket.timeout:
+                continue
+            except OSError:
+                if self.running:
+                    print("Error accepting client connection.")
+                break
+
+    def handle_client(self, client_socket, address):
+        try:
+            with client_socket:
+                client_socket.settimeout(30.0)
+
+                # Newline-delimited messages preserve TCP message boundaries.
+                with client_socket.makefile(
+                    "r", encoding="utf-8", newline="\n"
+                ) as reader:
+                    client_socket.sendall(
+                        b"Welcome to TCP Server! Commands: "
+                        b"TIME, DATE, HELLO, QUIT\n"
+                    )
+
+                    while self.running:
+                        message = reader.readline()
+
+                        if not message:
+                            break
+
+                        message = message.rstrip("\r\n")
+                        print(f"\nReceived from {address}: {message}")
+
+                        response = self.process_request(message)
+
+                        if response == "DISCONNECT":
+                            client_socket.sendall(b"Goodbye!\n")
+                            break
+
+                        client_socket.sendall(
+                            (response + "\n").encode("utf-8")
+                        )
+                        print(f"Sent to {address}: {response}")
+
+        except (OSError, UnicodeError) as exc:
+            if self.running:
+                print(f"Client {address} disconnected: {exc}")
+        finally:
+            print(f"Connection closed: {address}")
+
+    @staticmethod
+    def process_request(request):
+        cmd = request.strip().upper()
+
+        if cmd == "TIME":
+            return f"Server time: {datetime.now().strftime('%H:%M:%S')}"
+
+        if cmd == "DATE":
+            return f"Server date: {datetime.now().strftime('%Y-%m-%d')}"
+
+        if cmd == "HELLO":
+            return "Hello from TCP Server!"
+
+        if cmd in ("QUIT", "EXIT"):
+            return "DISCONNECT"
+
+        return f"Echo: {request}"
+
+    def stop(self):
+        self.running = False
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except OSError:
+                pass
+
+        print("Server stopped.")
+
+
+# ==================== TCP CLIENT ====================
+class TCPClient:
+    def __init__(self, host="127.0.0.1", port=12345):
+        self.host = host
+        self.port = port
+        self.client_socket = None
+        self.reader = None
+        self.connected = False
+
+    def connect(self):
+        try:
+            self.client_socket = socket.create_connection(
+                (self.host, self.port), timeout=5.0
+            )
+            self.client_socket.settimeout(5.0)
+
+            self.reader = self.client_socket.makefile(
+                "r", encoding="utf-8", newline="\n"
+            )
+
+            welcome = self.reader.readline()
+            if not welcome:
+                raise ConnectionError("Server closed the connection.")
+
+            self.connected = True
+            print(f"\nConnected! Server says: {welcome.strip()}\n")
+            return True
+
+        except (OSError, UnicodeError) as exc:
+            print(f"Connection failed: {exc}")
+            self.close()
+            return False
+
+    def send(self, message):
+        if not self.connected:
+            print("Not connected!")
+            return None
+
+        try:
+            print(f"\nYou: {message}")
+
+            self.client_socket.sendall(
+                (message + "\n").encode("utf-8")
+            )
+
+            response = self.reader.readline()
+
+            if not response:
+                print("Server closed the connection.")
+                self.connected = False
+                return None
+
+            response = response.rstrip("\r\n")
+            print(f"Server: {response}")
+
+            if response == "Goodbye!":
+                self.connected = False
+
+            return response
+
+        except (OSError, UnicodeError) as exc:
+            print(f"Communication error: {exc}")
+            self.connected = False
+            return None
+
+    def close(self):
+        self.connected = False
+
+        if self.reader:
+            try:
+                self.reader.close()
+            except OSError:
+                pass
+            self.reader = None
+
+        if self.client_socket:
+            try:
+                self.client_socket.close()
+            except OSError:
+                pass
+            self.client_socket = None
+
+
+# ==================== INTERACTIVE MODE ====================
+def run_interactive_tcp():
+    print("\n" + "*" * 60)
+    print("       TCP INTERACTIVE CLIENT-SERVER")
+    print("*" * 60)
+
+    server = TCPServer("127.0.0.1", 12345)
+
+    if not server.start():
+        return
+
+    client = TCPClient("127.0.0.1", server.port)
+
+    try:
+        # Allow the server's accept thread to start.
+        time.sleep(0.1)
+
+        if not client.connect():
+            return
+
+        print("=" * 60)
+        print("AVAILABLE COMMANDS")
+        print("  TIME  - Get server time")
+        print("  DATE  - Get server date")
+        print("  HELLO - Get a greeting")
+        print("  QUIT  - Disconnect")
+        print("  Other text - Echo your message")
+        print("=" * 60)
+
+        while client.connected:
+            try:
+                message = input("\nType a message (or QUIT to exit): ")
+
+                if not message.strip():
+                    continue
+
+                response = client.send(message)
+
+                if response is None or response == "Goodbye!":
+                    break
+
+            except EOFError:
+                print("\nInteractive input unavailable; starting demo.")
+                for msg in ["HELLO", "TIME", "DATE",
+                            "Testing TCP", "QUIT"]:
+                    if not client.connected:
+                        break
+                    client.send(msg)
+                    time.sleep(0.2)
+                break
+
+            except KeyboardInterrupt:
+                print("\nInterrupted by user.")
+                break
+
+    finally:
+        client.close()
+        server.stop()
+
+        print("\n" + "*" * 60)
+        print("       TCP SESSION COMPLETED")
+        print("*" * 60)
+
+
+if __name__ == "__main__":
+    run_interactive_tcp()
